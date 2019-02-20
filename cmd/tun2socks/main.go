@@ -21,7 +21,9 @@ import (
 
 	"github.com/eycorsican/go-tun2socks/core"
 	"github.com/eycorsican/go-tun2socks/filter"
+	"github.com/eycorsican/go-tun2socks/proxy"
 	"github.com/eycorsican/go-tun2socks/proxy/echo"
+	"github.com/eycorsican/go-tun2socks/proxy/redirect"
 	"github.com/eycorsican/go-tun2socks/proxy/shadowsocks"
 	"github.com/eycorsican/go-tun2socks/proxy/socks"
 	"github.com/eycorsican/go-tun2socks/proxy/v2ray"
@@ -47,6 +49,8 @@ func main() {
 	proxyPassword := flag.String("proxyPassword", "", "Password used for Shadowsocks proxy")
 	delayICMP := flag.Int("delayICMP", 10, "Delay ICMP packets for a short period of time, in milliseconds")
 	udpTimeout := flag.Duration("udpTimeout", 1*time.Minute, "Set timeout for UDP proxy connections in socks and Shadowsocks")
+	applog := flag.Bool("applog", false, "Enable app logging (V2Ray and SOCKS5 handler)")
+	disableDNSCache := flag.Bool("disableDNSCache", false, "Disable DNS cache (SOCKS5 and Shadowsocks handler)")
 
 	flag.Parse()
 
@@ -70,7 +74,14 @@ func main() {
 
 	// Wrap a writer to delay ICMP packets if delay time is not zero.
 	if *delayICMP > 0 {
+		log.Printf("ICMP packets will be delayed for %dms", *delayICMP)
 		lwipWriter = filter.NewICMPFilter(lwipWriter, *delayICMP).(io.Writer)
+	}
+
+	// Wrap a writer to print out processes the creating network connections.
+	if *applog {
+		log.Printf("App logging is enabled")
+		lwipWriter = filter.NewApplogFilter(lwipWriter).(io.Writer)
 	}
 
 	// Register TCP and UDP handlers to handle accepted connections.
@@ -79,16 +90,28 @@ func main() {
 		core.RegisterTCPConnectionHandler(echo.NewTCPHandler())
 		core.RegisterUDPConnectionHandler(echo.NewUDPHandler())
 		break
+	case "redirect":
+		core.RegisterTCPConnectionHandler(redirect.NewTCPHandler(*proxyServer))
+		core.RegisterUDPConnectionHandler(redirect.NewUDPHandler(*proxyServer, *udpTimeout))
+		break
 	case "socks":
 		core.RegisterTCPConnectionHandler(socks.NewTCPHandler(proxyHost, proxyPort))
-		core.RegisterUDPConnectionHandler(socks.NewUDPHandler(proxyHost, proxyPort, *udpTimeout))
+		if *disableDNSCache {
+			core.RegisterUDPConnectionHandler(socks.NewUDPHandler(proxyHost, proxyPort, *udpTimeout, nil))
+		} else {
+			core.RegisterUDPConnectionHandler(socks.NewUDPHandler(proxyHost, proxyPort, *udpTimeout, proxy.NewDNSCache()))
+		}
 		break
 	case "shadowsocks":
 		if *proxyCipher == "" || *proxyPassword == "" {
 			log.Fatal("invalid cipher or password")
 		}
 		core.RegisterTCPConnectionHandler(shadowsocks.NewTCPHandler(core.ParseTCPAddr(proxyHost, proxyPort).String(), *proxyCipher, *proxyPassword))
-		core.RegisterUDPConnectionHandler(shadowsocks.NewUDPHandler(core.ParseUDPAddr(proxyHost, proxyPort).String(), *proxyCipher, *proxyPassword, *udpTimeout))
+		if *disableDNSCache {
+			core.RegisterUDPConnectionHandler(shadowsocks.NewUDPHandler(core.ParseUDPAddr(proxyHost, proxyPort).String(), *proxyCipher, *proxyPassword, *udpTimeout, nil))
+		} else {
+			core.RegisterUDPConnectionHandler(shadowsocks.NewUDPHandler(core.ParseUDPAddr(proxyHost, proxyPort).String(), *proxyCipher, *proxyPassword, *udpTimeout, proxy.NewDNSCache()))
+		}
 		break
 	case "v2ray":
 		core.SetBufferPool(vbytespool.GetPool(core.BufSize))
@@ -107,11 +130,12 @@ func main() {
 
 		v, err := vcore.StartInstance("json", configBytes)
 		if err != nil {
-			log.Fatal("start V instance failed: %v", err)
+			log.Fatalf("start V instance failed: %v", err)
 		}
 
 		// Wrap a writer for adding routes according to V2Ray's routing results if dynamic routing is enabled.
 		if *gateway != "" {
+			log.Printf("Dynamic routing is enabled")
 			router := v.GetFeature(vrouting.RouterType()).(vrouting.Router)
 			lwipWriter = filter.NewRoutingFilter(lwipWriter, router, *gateway).(io.Writer)
 		}
@@ -144,11 +168,11 @@ func main() {
 	go func() {
 		_, err := io.CopyBuffer(lwipWriter, tunDev, make([]byte, MTU))
 		if err != nil {
-			log.Fatal("copying data failed: %v", err)
+			log.Fatalf("copying data failed: %v", err)
 		}
 	}()
 
-	log.Printf("running tun2socks")
+	log.Printf("Running tun2socks")
 
 	osSignals := make(chan os.Signal, 1)
 	signal.Notify(osSignals, os.Interrupt, os.Kill, syscall.SIGTERM, syscall.SIGHUP)

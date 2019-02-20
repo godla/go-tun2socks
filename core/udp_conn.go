@@ -9,10 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"unsafe"
 )
 
 type udpConn struct {
+	sync.Mutex
+
 	pcb        *C.struct_udp_pcb
 	handler    ConnectionHandler
 	localAddr  net.Addr
@@ -24,12 +27,12 @@ type udpConn struct {
 	closed     bool
 }
 
-func NewUDPConnection(pcb *C.struct_udp_pcb, handler ConnectionHandler, localIP, remoteIP C.ip_addr_t, localPort, remotePort C.u16_t) (Connection, error) {
+func newUDPConnection(pcb *C.struct_udp_pcb, handler ConnectionHandler, localIP, remoteIP C.ip_addr_t, localPort, remotePort C.u16_t) (Connection, error) {
 	conn := &udpConn{
 		handler:    handler,
 		pcb:        pcb,
-		localAddr:  ParseUDPAddr(IPAddrNTOA(localIP), uint16(localPort)),
-		remoteAddr: ParseUDPAddr(IPAddrNTOA(remoteIP), uint16(remotePort)),
+		localAddr:  ParseUDPAddr(ipAddrNTOA(localIP), uint16(localPort)),
+		remoteAddr: ParseUDPAddr(ipAddrNTOA(remoteIP), uint16(remotePort)),
 		localIP:    localIP,
 		remoteIP:   remoteIP,
 		localPort:  localPort,
@@ -52,7 +55,7 @@ func (conn *udpConn) LocalAddr() net.Addr {
 }
 
 func (conn *udpConn) Receive(data []byte) error {
-	if conn.closed {
+	if conn.isClosed() {
 		return errors.New("connection closed")
 	}
 	lwipMutex.Unlock()
@@ -82,12 +85,20 @@ func (conn *udpConn) Sent(len uint16) error {
 	return nil
 }
 
+func (conn *udpConn) isClosed() bool {
+	conn.Lock()
+	defer conn.Unlock()
+	return conn.closed
+}
+
 func (conn *udpConn) Close() error {
 	connId := udpConnId{
 		src: conn.LocalAddr().String(),
 		dst: conn.RemoteAddr().String(),
 	}
+	conn.Lock()
 	conn.closed = true
+	conn.Unlock()
 	udpConns.Delete(connId)
 	return nil
 }

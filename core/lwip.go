@@ -13,8 +13,8 @@ import (
 	"unsafe"
 )
 
-const CHECK_TIMEOUTS_INTERVAL = 250                                     // in millisecond
-const TCP_POLL_INTERVAL = 2 * (float32(1000) / CHECK_TIMEOUTS_INTERVAL) // poll every 2 seconds
+const CHECK_TIMEOUTS_INTERVAL = 250 // in millisecond
+const TCP_POLL_INTERVAL = 8         // poll every 4 seconds
 
 type LWIPStack interface {
 	Write([]byte) (int, error)
@@ -54,12 +54,7 @@ func NewLWIPStack() LWIPStack {
 		panic("can not allocate tcp pcb")
 	}
 
-	// We can't call C function with Go functions as arguments here, it will
-	// fail in compile time:
-	// cannot use TCPAcceptFn (type func(unsafe.Pointer, *_Ctype_struct_tcp_pcb, _Ctype_schar) _Ctype_schar) as type *[0]byte in argument to func literal
-	// I can't find other workarounds.
-	// C.tcp_accept(tcpPCB, TCPAcceptFn)
-	SetTCPAcceptCallback(tcpPCB)
+	setTCPAcceptCallback(tcpPCB)
 
 	udpPCB := C.udp_new()
 	if udpPCB == nil {
@@ -71,7 +66,7 @@ func NewLWIPStack() LWIPStack {
 		panic("address already in use")
 	}
 
-	SetUDPRecvCallback(udpPCB, nil)
+	setUDPRecvCallback(udpPCB, nil)
 
 	go func() {
 		for {
